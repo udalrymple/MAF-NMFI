@@ -1,0 +1,145 @@
+## Boosted regression tree model to estimate environmental suitability for non-malarial fever across Africa (covariate used in final model)
+
+data_brt2<-read.csv("Z:\\Malaria data\\ACT treatment\\BRT revision\\cellnum.data_allcovariates.csv")
+
+data_brt2<-data_brt2[,2:length(data_brt2)] # remove index columns
+data_brt2<-subset(data_brt2,data_brt2$Tested>10)
+
+a<-(sum(data_brt2$PnegFposTpos)+sum(data_brt2$PnegFposTneg))/sum(data_brt2$Tested)
+b<-1-a
+
+data_brt2$pbg<-log(qbeta(0.5,(data_brt2$PnegFposTpos+data_brt2$PnegFposTneg+a), data_brt2$PnegFneg+b))
+
+gbm.x<-20:194 # columns of covariate data
+gbm.y<-19# empirical logit pfpr column
+
+library(dismo)
+test2<-gbm.step(data=data_brt2, gbm.x=gbm.x, gbm.y=gbm.y, family="gaussian", tree.complexity=5, learning.rate=0.01, bag.fraction=0.5)
+
+conts<-test2$contributions
+
+write.csv(conts,"Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\Fever onemodel conts.csv")
+
+
+
+## predict using covariates; monthly predicitons
+# find type of covariate (s, y, mo, md)
+metadata<-read.csv("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\trials\\colinear removed\\malaria_final_medianstdev.csv")
+
+
+years<-rep(2000:2014,each=12)
+months<-rep(1:12,15)
+
+monthnums<-c("01","02","03","04","05","06","07","08","09","10","11","12")
+
+try(
+for (i in 73:180){ #73 is beginning of 2006
+  year<-years[i]
+  month<-months[i]
+  month<-monthnums[month]
+  rasterstack<-stack()
+  
+  # stationary covariates
+  s.covs<-subset(metadata,metadata$type=="s")
+  for (x in 1:nrow(s.covs)){ 
+    name<-as.vector(s.covs[x,"covariate"])
+    path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",name,".tif")
+    rast<-raster(path)
+    names(rast)<-name
+    rasterstack<-stack(rasterstack,rast)
+  }
+
+  # year-only covariates
+  y.covs<-subset(metadata,metadata$type=="y")
+  for (y in 1:nrow(y.covs)){ 
+   name<-as.vector(y.covs[y,"covariate"])
+   ifelse(file.exists(paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",year,".tif")),
+         path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",year,".tif"),
+         {ifelse(year<2005, 
+                 path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",(year+1),".tif"),
+                 {ifelse(file.exists(paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",(year-1),".tif")),
+                         path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",(year-1),".tif"),
+                         path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",(year-2),".tif"))})
+         })
+   rast<-raster(path)
+  names(rast)<-name
+   rasterstack<-stack(rasterstack,rast)
+  } 
+
+  #month-only covariates
+  mo.covs<-subset(metadata,metadata$type=="mo")
+  for (z in 1:nrow(mo.covs)){ 
+    name<-as.vector(mo.covs[z,"covariate"])
+    path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",month,".tif")
+    rast<-raster(path)
+    names(rast)<-name
+    rasterstack<-stack(rasterstack,rast)
+  }
+
+  #monthly dynamic covariates
+  md.covs<-subset(metadata,metadata$type=="md"|metadata$type=="weird_type1"|metadata$type=="weird_type2")
+  for (p in 1:nrow(md.covs)){ 
+    name<-as.vector(md.covs[p,"covariate"])
+    base.name<-as.vector(md.covs[p,"base.covariate"]) # name of covariate without the lag month value
+    ifelse(file.exists(paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",base.name,".",year,".",month,".tif")),
+         path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",base.name,".",year,".",month,".tif"),
+         {ifelse(year==2014,
+           path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",base.name,".",(year-1),".",month,".tif"),
+           path<-paste0("Z:\\Malaria data\\Fever Attrib-Asymp\\Covariates\\BRT\\covariate rasters\\malaria_untransformed_NAadded\\",name,"\\",base.name,".",(year+1),".",month,".tif"))
+           })
+    rast<-raster(path)
+    names(rast)<-name
+    rasterstack<-stack(rasterstack,rast)
+  }
+#assign(paste0("stack.",year,".",month), value= rasterstack)
+assign(paste("prediction",year,month, sep="."), predict(object=rasterstack,model=test2,n.trees=test2$gbm.call$best.trees,type="response",na.rm=TRUE))
+writeRaster(x=get(paste("prediction",year,month, sep=".")), filename=paste0("Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\monthly\\",year,"_",month), format="GTiff")
+rm(list=ls(pattern="prediction"))
+}
+)
+######### create yearly means
+
+library(rgdal)
+library(raster)
+library(stringr)
+
+file.list<-list.files(path="Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\monthly\\")
+file.list<-file.list[grep("*.tif$",(file.list))]
+
+for (i in 7:15){ # each year
+  year<-1999+i
+  rasters<-grep(year,file.list,value=T)
+  rasterstack<-stack()
+  for (x in 1:12){
+    rast<-raster(paste0("Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\monthly\\",rasters[x]))
+    rasterstack<-stack(rasterstack,rast)
+  }
+  yearly.mean<-sum(rasterstack)/12
+  writeRaster(yearly.mean, filename=paste0("Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\yearly\\not gap filled\\",year), format="GTiff")
+}
+
+######## gap-fill yearly mean layers
+rm(list=ls())
+path<-"Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\yearly\\not gap filled\\"
+raster.list<-list.files(path)
+raster.list<-raster.list[grep(pattern=".tif$",raster.list)] # list yearly prediction rasters
+trans.limits<-readOGR(dsn="Z:\\Malaria data\\Fever Attrib-Asymp\\data\\Shapefiles" , layer="stable_transmission") #load shapefile of transmission limits for re-clipping later
+
+
+fill.na <- function(x, i=5) {  # function to search for NA values and replace them with the mean value within a search window. index = 5 for a 3x3 search window (scanning window is every cell adjacent to target cell, and the i value is the position of the central cell in a matrix of 3 by 3 cells) 
+  if( is.na(x)[i] ) {# if central cell (i) in scanning window is NA, replace it with the mean
+    return(mean(x, na.rm=TRUE))
+  } else {
+    return(x[i]) # if not NA, just return the cell value 
+  }
+}
+
+for (i in 1:length(raster.list)){#:length(raster.list)){
+  rast<-raster(paste0(path,raster.list[i]))
+  r2<-focal(rast, w = matrix(1,3,3), fun = fill.na, pad = TRUE, na.rm = FALSE) # create new partially-filled raster - have to repeat a few times to fill largest gaps
+  r3<-focal(r2, w = matrix(1,3,3), fun = fill.na, pad = TRUE, na.rm = FALSE) 
+  r4<- focal(r3, w = matrix(1,3,3), fun = fill.na, pad = TRUE, na.rm = FALSE) # 4 times seems to be enough to fill largest holes
+  result.raster<-mask(x=r4, mask=trans.limits) # re-clip by transmission limits, as the raster grows at edges with each fill repeat
+  result.raster[result.raster==-9999]<-NA
+  writeRaster(result.raster,paste0("Z:\\Malaria data\\ACT treatment\\BRT revision\\fever\\yearly\\gap filled\\",raster.list[i]),format="GTiff")
+}
