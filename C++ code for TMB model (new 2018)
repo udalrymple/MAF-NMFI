@@ -1,0 +1,342 @@
+#include <TMB.hpp>
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+  using namespace R_inla;
+  using namespace density;
+  using namespace Eigen;
+  using namespace density;
+  
+  DATA_INTEGER(N);
+
+  DATA_IVECTOR(Pstat);
+  DATA_IVECTOR(Fstat);
+  DATA_IVECTOR(Tstat);
+  DATA_IVECTOR(Hstat);
+  DATA_IVECTOR(Astat);
+  
+  DATA_VECTOR(F_BRT);
+  DATA_VECTOR(T_BRT);
+  DATA_VECTOR(PR);
+  DATA_VECTOR(pcure);
+  
+  DATA_INTEGER(nsurvey);
+  DATA_IVECTOR(survey);
+  DATA_VECTOR(prevert);
+  DATA_IVECTOR(wealth);
+  DATA_IVECTOR(mother);
+  DATA_IVECTOR(age);
+  DATA_VECTOR(net);
+  
+  DATA_MATRIX(A);
+  DATA_STRUCT(spde,spde_t);
+  
+  PARAMETER(log_kappa_pbg);
+  PARAMETER(log_tau_pbg);
+  PARAMETER_VECTOR(logit_pbg_offset);
+
+  PARAMETER(log_kappa_pr);
+  PARAMETER(log_tau_pr);
+  PARAMETER_VECTOR(logit_pr_offset);
+
+  PARAMETER(log_kappa_ptreat);
+  PARAMETER(log_tau_ptreat);
+  PARAMETER(mean_logit_ptreat_offset);
+  PARAMETER_VECTOR(logit_ptreat_offset);
+  
+  PARAMETER(mean_logit_ptreatmaf_offset);
+  PARAMETER(log_sd_logit_ptreatmaf_offset);
+  PARAMETER_VECTOR(logit_ptreatmaf_offset);
+  
+  PARAMETER(mean_logit_ptreatboth_offset);
+  PARAMETER(log_sd_logit_ptreatboth_offset);
+  PARAMETER_VECTOR(logit_ptreatboth_offset);
+  
+  PARAMETER(logit_prop_maf);
+  PARAMETER(slope_maf);
+  PARAMETER(slope_maf_sq);
+  
+  PARAMETER(mean_logit_pundertreat);
+  PARAMETER(log_sd_logit_pundertreat);
+  PARAMETER_VECTOR(logit_pundertreat);
+  PARAMETER(offset_private_pundertreat);
+  
+  PARAMETER(mean_logit_povertreat);
+  PARAMETER(log_sd_logit_povertreat);
+  PARAMETER_VECTOR(logit_povertreat);
+  PARAMETER(offset_private_povertreat);
+  
+  PARAMETER(mean_logit_pprick);
+  PARAMETER(log_sd_logit_pprick);
+  PARAMETER_VECTOR(logit_pprick);
+  PARAMETER(offset_private_pprick);
+  
+  PARAMETER(mean_logit_ppresumptive);
+  PARAMETER(log_sd_logit_ppresumptive);
+  PARAMETER_VECTOR(logit_ppresumptive);
+  PARAMETER(offset_private_ppresumptive);
+  
+  PARAMETER(net_effect_pr);
+  PARAMETER_VECTOR(wealth_effect_pr_raw);
+  PARAMETER_VECTOR(mother_effect_pr_raw);
+  PARAMETER_VECTOR(age_effect_pr_raw);
+  PARAMETER_VECTOR(wealth_effect_pbg_raw);
+  PARAMETER_VECTOR(mother_effect_pbg_raw);
+  PARAMETER_VECTOR(age_effect_pbg_raw);
+  PARAMETER_VECTOR(wealth_effect_ptreat_raw);
+  PARAMETER_VECTOR(mother_effect_ptreat_raw);
+  PARAMETER_VECTOR(age_effect_ptreat_raw);
+  
+  Type nll = 0.0;
+  
+  nll -= dnorm(net_effect_pr,Type(0.0),Type(1.0),true);
+  
+  nll -= dnorm(log_kappa_pbg,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_tau_pbg,Type(0.0),Type(1.0),true);
+  
+  SparseMatrix<Type> Q_pbg = Q_spde(spde,exp(log_kappa_pbg));
+  nll += SCALE(GMRF(Q_pbg),1.0/exp(log_tau_pbg))(logit_pbg_offset);
+  
+  vector<Type> pbg_offset_prediction;
+  pbg_offset_prediction = A*logit_pbg_offset;
+  
+  nll -= dnorm(log_kappa_pr,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_tau_pr,Type(0.0),Type(1.0),true);
+
+  SparseMatrix<Type> Q_pr = Q_spde(spde,exp(log_kappa_pr));
+  nll += GMRF(Q_pr)(logit_pr_offset);
+  nll += SCALE(GMRF(Q_pr),1.0/exp(log_tau_pr))(logit_pr_offset);
+  
+  vector<Type> pr_offset_prediction;
+  pr_offset_prediction = A*logit_pr_offset;
+  
+  nll -= dnorm(log_kappa_ptreat,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_tau_ptreat,Type(0.0),Type(1.0),true);
+  nll -= dnorm(mean_logit_ptreat_offset,Type(0.0),Type(1.0),true);
+  
+  SparseMatrix<Type> Q_ptreat = Q_spde(spde,exp(log_kappa_ptreat));
+  nll += SCALE(GMRF(Q_ptreat),1.0/exp(log_tau_ptreat))(logit_ptreat_offset);
+  
+  vector<Type> ptreat_offset_prediction;
+  ptreat_offset_prediction = A*logit_ptreat_offset;
+  
+  nll -= dnorm(mean_logit_ptreatmaf_offset,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_ptreatmaf_offset,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_ptreatmaf_offset[i],mean_logit_ptreatmaf_offset,exp(log_sd_logit_ptreatmaf_offset),true);
+  }
+  
+  nll -= dnorm(mean_logit_ptreatboth_offset,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_ptreatboth_offset,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_ptreatboth_offset[i],mean_logit_ptreatboth_offset,exp(log_sd_logit_ptreatboth_offset),true);
+  }
+  
+  nll -= dnorm(mean_logit_pundertreat,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_pundertreat,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_pundertreat[i],mean_logit_pundertreat,exp(log_sd_logit_pundertreat),true);
+  }
+  nll -= dnorm(offset_private_pundertreat,Type(0.0),Type(1.0),true);
+  
+  nll -= dnorm(mean_logit_povertreat,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_povertreat,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_povertreat[i],mean_logit_povertreat,exp(log_sd_logit_povertreat),true);
+  }
+  nll -= dnorm(offset_private_povertreat,Type(0.0),Type(1.0),true);
+  
+  nll -= dnorm(mean_logit_pprick,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_pprick,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_pprick[i],mean_logit_pprick,exp(log_sd_logit_pprick),true);
+  }
+  nll -= dnorm(offset_private_pprick,Type(0.0),Type(1.0),true);
+  
+  nll -= dnorm(mean_logit_ppresumptive,Type(0.0),Type(1.0),true);
+  nll -= dnorm(log_sd_logit_ppresumptive,Type(0.0),Type(1.0),true);
+  for (int i=0; i<nsurvey; i++) {
+    nll -= dnorm(logit_ppresumptive[i],mean_logit_ppresumptive,exp(log_sd_logit_ppresumptive),true);
+  }
+  nll -= dnorm(offset_private_ppresumptive,Type(0.0),Type(1.0),true);
+  
+  for (int i=0; i<4; i++) {nll -= dnorm(wealth_effect_pr_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<3; i++) {nll -= dnorm(mother_effect_pr_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<4; i++) {nll -= dnorm(age_effect_pr_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<4; i++) {nll -= dnorm(wealth_effect_pbg_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<3; i++) {nll -= dnorm(mother_effect_pbg_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<4; i++) {nll -= dnorm(age_effect_pbg_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<4; i++) {nll -= dnorm(wealth_effect_ptreat_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<3; i++) {nll -= dnorm(mother_effect_ptreat_raw[i],Type(0.0),Type(1.0),true);}
+  for (int i=0; i<4; i++) {nll -= dnorm(age_effect_ptreat_raw[i],Type(0.0),Type(1.0),true);}
+  
+  vector<Type> wealth_effect_pr(5);
+  vector<Type> mother_effect_pr(4);
+  vector<Type> age_effect_pr(5);
+  vector<Type> wealth_effect_pbg(5);
+  vector<Type> mother_effect_pbg(4);
+  vector<Type> age_effect_pbg(5);
+  vector<Type> wealth_effect_ptreat(5);
+  vector<Type> mother_effect_ptreat(4);
+  vector<Type> age_effect_ptreat(5);
+  
+  for (int i=0; i<4; i++) {wealth_effect_pr[i] = wealth_effect_pr_raw[i];}
+  wealth_effect_pr[4] = 0.0;
+  for (int i=0; i<3; i++) {mother_effect_pr[i] = mother_effect_pr_raw[i];}
+  mother_effect_pr[3] = 0.0;
+  for (int i=0; i<4; i++) {age_effect_pr[i] = age_effect_pr_raw[i];}
+  age_effect_pr[4] = 0.0;
+  
+  for (int i=0; i<4; i++) {wealth_effect_pbg[i] = wealth_effect_pbg_raw[i];}
+  wealth_effect_pbg[4] = 0.0;
+  for (int i=0; i<3; i++) {mother_effect_pbg[i] = mother_effect_pbg_raw[i];}
+  mother_effect_pbg[3] = 0.0;
+  for (int i=0; i<4; i++) {age_effect_pbg[i] = age_effect_pbg_raw[i];}
+  age_effect_pbg[4] = 0.0;
+  
+  for (int i=0; i<4; i++) {wealth_effect_ptreat[i] = wealth_effect_ptreat_raw[i];}
+  wealth_effect_ptreat[4] = 0.0;
+  for (int i=0; i<3; i++) {mother_effect_ptreat[i] = mother_effect_ptreat_raw[i];}
+  mother_effect_ptreat[3] = 0.0;
+  for (int i=0; i<4; i++) {age_effect_ptreat[i] = age_effect_ptreat_raw[i];}
+  age_effect_ptreat[4] = 0.0;
+  
+  vector<Type> logit_pr(N);
+  vector<Type> logit_pbg(N);
+  vector<Type> logit_ptreat(N);
+  vector<Type> pr(N);
+  vector<Type> pbg(N);
+  vector<Type> ptreat(N);
+  vector<Type> ptreatmaf(N);
+  vector<Type> ptreatboth(N);
+  
+  for (int i=0; i<N; i++) {
+    logit_pr[i] = net_effect_pr*net[i]+pr_offset_prediction[i]+logit(PR[i])+wealth_effect_pr[wealth[i]]+mother_effect_pr[mother[i]]+age_effect_pr[age[i]];
+    logit_pbg[i] = pbg_offset_prediction[i]+F_BRT[i]+wealth_effect_pbg[wealth[i]]+mother_effect_pbg[mother[i]]+age_effect_pbg[age[i]];
+    logit_ptreat[i] = ptreat_offset_prediction[i]+T_BRT[i]+mean_logit_ptreat_offset+wealth_effect_ptreat[wealth[i]]+mother_effect_ptreat[mother[i]]+age_effect_ptreat[age[i]];
+  }
+  
+  nll -= dnorm(logit_prop_maf,Type(3.0),Type(1.0),true);
+  nll -= dnorm(slope_maf,Type(0.0),Type(1.0),true);
+  nll -= dnorm(slope_maf_sq,Type(0.0),Type(0.5),true);
+  vector<Type> maf(N);
+  vector<Type> pundertreat(N);
+  vector<Type> povertreat(N);
+  vector<Type> pprick(N);
+  vector<Type> ppresumptive(N);
+  for (int i=0; i<N; i++) {
+    maf[i] = invlogit(logit_prop_maf + slope_maf*invlogit(logit_pr[i]) + slope_maf_sq*invlogit(logit_pr[i])*invlogit(logit_pr[i]));
+    pr[i] = invlogit(logit_pr[i]);
+    pbg[i] = invlogit(logit_pbg[i]);
+    ptreat[i] = invlogit(logit_ptreat[i]);
+    ptreatmaf[i] = invlogit(logit_ptreat[i]+logit_ptreatmaf_offset[survey[i]]);
+    ptreatboth[i] = invlogit(logit_ptreat[i]+logit_ptreatboth_offset[survey[i]]);
+    if ((Tstat[i]==0) | (Tstat[i]==1)) {
+      pundertreat[i] = invlogit(logit_pundertreat[survey[i]]);
+    } else if (Tstat[i]==2) {
+      pundertreat[i] = invlogit(logit_pundertreat[survey[i]]+offset_private_pundertreat);
+    }
+    if ((Tstat[i]==0) | (Tstat[i]==1)) {
+      povertreat[i] = invlogit(logit_povertreat[survey[i]]);
+    } else if (Tstat[i]==2) {
+      povertreat[i] = invlogit(logit_povertreat[survey[i]]+offset_private_povertreat);
+    }
+    if ((Tstat[i]==0) | (Tstat[i]==1)) {
+      pprick[i] = invlogit(logit_pprick[survey[i]]);
+    } else if (Tstat[i]==2) {
+      pprick[i] = invlogit(logit_pprick[survey[i]]+offset_private_pprick);
+    }
+    if ((Tstat[i]==0) | (Tstat[i]==1)) {
+      ppresumptive[i] = invlogit(logit_ppresumptive[survey[i]]);
+    } else if (Tstat[i]==2) {
+      ppresumptive[i] = invlogit(logit_ppresumptive[survey[i]]+offset_private_ppresumptive);
+    }
+  }
+    
+  for (int i=0; i<N; i++) {
+    
+    if ((Pstat[i]==1) & (Fstat[i]==0)) {
+    // P:+ F:N  
+      nll -= log(pr[i]*(1-maf[i])*(1-pbg[i]));
+
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==1) & (Astat[i]==1)) {
+    // P:+ F:Y T:Y H:Y A:Y
+      nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*(1.0-pundertreat[i])*((1.0-prevert[i])*pcure[i] + (1.0-pcure[i])));
+
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==1) & (Astat[i]==0)) {
+    // P:+ F:Y T:Y H:Y A:N
+      nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*pundertreat[i]);
+    
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==0) & (Astat[i]==1)) {
+    // P:+ F:Y T:Y H:N A:Y
+      nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*ppresumptive[i]*((1.0-prevert[i])*pcure[i] + (1.0-pcure[i])));
+    
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==0) & (Astat[i]==0)) {
+    // P:+ F:Y T:Y H:N A:N
+       nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*(1.0-ppresumptive[i]));
+      
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & (Tstat[i]==0)) {
+    // P:+ F:Y T:N
+      nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*(1.0-ptreatmaf[i])+maf[i]*pbg[i]*(1.0-ptreatboth[i])+(1.0-maf[i])*pbg[i]*(1.0-ptreat[i])));
+  
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==1) & (Astat[i]==1)) {
+    // P:- F:Y T:Y H:Y A:Y
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*pprick[i]*povertreat[i]+pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*(1.0-pundertreat[i])*prevert[i]*pcure[i]);
+  
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==1) & (Astat[i]==0)) {
+    // P:- F:Y T:Y H:Y A:N  
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-povertreat[i])*pprick[i]);
+
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==0) & (Astat[i]==1)) {
+    // P:- F:Y T:Y H:N A:Y  
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-pprick[i])*ppresumptive[i] + pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*ppresumptive[i]*prevert[i]*pcure[i]);
+        
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]==0) & (Astat[i]==0)) {
+    // P:- F:Y T:Y H:N A:N
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-pprick[i])*(1.0-ppresumptive[i]));
+    
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & (Tstat[i]==0)) {
+    // P:- F:Y T:N
+      nll -= log((1.0-pr[i])*pbg[i]*(1.0-ptreat[i]));
+      
+    } else if ((Pstat[i]==0) & (Fstat[i]==0)) {
+    // P:- F:N
+      nll -= log((1.0-pr[i])*(1.0-pbg[i]));
+      
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]=2) & (Astat[i]=1)) {
+      // P:+ F:Y T:Y H:? A:Y
+      nll -= log( pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*(1.0-pundertreat[i])*((1.0-prevert[i])*pcure[i] + (1.0-pcure[i])) 
+             + pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*ppresumptive[i]*((1.0-prevert[i])*pcure[i] + (1.0-pcure[i])));     
+
+    } else if ((Pstat[i]==1) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]=2) & (Astat[i]=0)) {
+      // P:+ F:Y T:Y H:? A:N
+      nll -= log(pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*pundertreat[i]
+        +pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*(1.0-ppresumptive[i]));
+
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]=2) & (Astat[i]=1)) {
+      // P:- F:Y T:Y H:? A:Y
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*pprick[i]*povertreat[i]+pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*pprick[i]*(1.0-pundertreat[i])*prevert[i]*pcure[i]
+        +(1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-pprick[i])*ppresumptive[i] + pr[i]*(maf[i]*(1.0-pbg[i])*ptreatmaf[i]+maf[i]*pbg[i]*ptreatboth[i]+(1.0-maf[i])*pbg[i]*ptreat[i])*(1.0-pprick[i])*ppresumptive[i]*prevert[i]*pcure[i]);
+      
+    } else if ((Pstat[i]==0) & (Fstat[i]==1) & ((Tstat[i]==1) | (Tstat[i]==2)) & (Hstat[i]=2) & (Astat[i]=0)) {
+      // P:- F:Y T:Y H:? A:N
+      nll -= log((1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-povertreat[i])*pprick[i]
+        + (1.0-pr[i])*pbg[i]*ptreat[i]*(1.0-pprick[i])*(1.0-ppresumptive[i]));
+    }  
+    
+  }
+  
+  REPORT(pr);
+  REPORT(pbg);
+  REPORT(ptreat);
+  REPORT(ptreatboth);
+  REPORT(ptreatmaf);
+  REPORT(povertreat);
+  REPORT(ppresumptive);
+  REPORT(pprick);
+  REPORT(pundertreat);
+  REPORT(maf);
+
+  return nll;
+}
+
