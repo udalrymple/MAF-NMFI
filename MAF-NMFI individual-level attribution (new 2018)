@@ -1,0 +1,635 @@
+### R script for individual level predictions of malaria fever status and case management successes 
+
+## This script requires DHS Program dataset as response data, tabulated at individual-level with all indicators matching the names described below
+## DHS Program data is available on request at https://dhsprogram.com/
+
+# C++ code also provided in this GitHub is required for use in TMB model
+# A sample of results tabulations which can be modified to produce any suite of results is appended to the model fitting R code
+
+
+library(INLA)
+library(raster)
+library(splancs)
+
+setwd("") # location of DHS Program Data
+rm(list=ls())
+
+nmfi.data <- read.csv("") # csv of DHS Program data
+
+valid <- which(!(is.na(as.numeric(as.character(nmfi.data$LAT))) | is.na(as.numeric(as.character(nmfi.data$LONG))) | is.na(nmfi.data$fever) | is.na(nmfi.data$age.months) | is.na(nmfi.data$wealth.index) | is.na(nmfi.data$mother.education)) & !is.na(nmfi.data$slept.under.net.official))
+
+N <- length(valid)
+
+Pstat <- nmfi.data$rdt.result[valid]
+Fstat <- nmfi.data$fever[valid]
+Tstat <- nmfi.data$sought.treat[valid]
+Tstat[Fstat==0] <- 0
+Tstat[is.na(Tstat)] <- 0
+Hstat <- nmfi.data$finger.heel[valid]
+Hstat[Tstat==0] <- 0
+Astat <- nmfi.data$antimalarial.received[valid]
+Astat[Tstat==0] <- 0
+
+F_BRT <- nmfi.data$Fever.BRT[valid]
+T_BRT <- nmfi.data$Treatseek.BRT[valid]
+
+library(ageStand)
+approx.agestand <- approxfun(seq(0,1,length.out=100),ageStand::convertPrevalence(seq(0,1,length.out=100),rep(0,100),rep(4,100),rep(2,100),rep(9,100)))
+RDTPR <- pnorm((qnorm(approx.agestand(nmfi.data$nature.pr[valid]))+0.22)/0.97)
+approx.agestand <- approxfun(seq(0,1,length.out=100),ageStand::convertPrevalence(seq(0,1,length.out=100),rep(2,100),rep(9,100),rep(0,100),rep(4,100)))
+PR <- approx.agestand(RDTPR)
+
+pcure <- nmfi.data$drug.eff[valid]
+survey <- nmfi.data$survey.x[valid]
+for (s in unique(survey)) {
+  pcure[survey==s & is.na(pcure)] <- mean(pcure[survey==s],na.rm=T) # impute missing pcure values from survey means
+}
+
+long.lat <- cbind(as.numeric(as.character(nmfi.data$LONG))[valid],as.numeric(as.character(nmfi.data$LAT))[valid])
+survey <- match(nmfi.data$survey.x[valid],unique(nmfi.data$survey.x[valid]))-1
+nsurvey <- length(unique(survey))
+rdt.persist <- nmfi.data$rdt.persist[valid]
+
+act <- nmfi.data$antimalarial.type[valid]
+act[is.na(act)] <- 0
+
+net <- nmfi.data$slept.under.net.official[valid]
+treatmentlocation <- nmfi.data$sought.treat[valid]
+treatmentlocation[is.na(treatmentlocation)] <- 0
+
+age.categorical <- floor(nmfi.data$age.months[valid]/12)
+age.categorical[age.categorical==5] <- 4
+wealth <- match(as.character(nmfi.data$wealth.index[valid]),rev(c("-1.15","-0.5","0","0.5","1.15")))-1
+
+mothers.education <- match(as.character(nmfi.data$mother.education[valid]),rev(c("No education","Primary","Secondary","Higher")))-1
+
+weights <- nmfi.data$weight[valid]/1000000
+
+Africa.mesh <- inla.mesh.2d(long.lat,max.edge=5,cut=0.5,offset=c(5,5))
+
+data <- list(
+  'N'=length(valid),
+  'Pstat'=Pstat,
+  'Fstat'=Fstat,
+  'Tstat'=Tstat,
+  'Hstat'=Hstat,
+  'Astat'=Astat,
+  'F_BRT'=F_BRT,
+  'T_BRT'=T_BRT,
+  'PR'=PR,
+  'pcure'=pcure,
+  'nsurvey'=nsurvey,
+  'survey'=survey,
+  'prevert'=rdt.persist,
+  'wealth'=wealth,
+  'mother'=mothers.education,
+  'age'=age.categorical,
+  'net'=net,
+  'A'=as.matrix(inla.mesh.project(Africa.mesh,long.lat)$A),
+  'spde'=(inla.spde2.matern(Africa.mesh,alpha=2)$param.inla)[c("M0","M1","M2")]
+)
+
+parameters <- list('log_kappa_pbg'=0,
+                   'log_tau_pbg'=0,
+                   'logit_pbg_offset'=rep(0,Africa.mesh$n),
+                   'log_kappa_pr'=0,
+                   'log_tau_pr'=0,
+                   'logit_pr_offset'=rep(0,Africa.mesh$n),
+                   'log_kappa_ptreat'=0,
+                   'log_tau_ptreat'=0,
+                   'mean_logit_ptreat_offset'=0,
+                   'logit_ptreat_offset'=rep(0,Africa.mesh$n),
+                   'mean_logit_ptreatmaf_offset'=0,
+                   'log_sd_logit_ptreatmaf_offset'=0,
+                   'logit_ptreatmaf_offset'=rep(0,nsurvey),
+                   'mean_logit_ptreatboth_offset'=0,
+                   'log_sd_logit_ptreatboth_offset'=0,
+                   'logit_ptreatboth_offset'=rep(0,nsurvey),
+                   'logit_prop_maf'=0,
+                   'slope_maf'=0,
+                   'slope_maf_sq'=0,
+                   'mean_logit_pundertreat'=0,
+                   'log_sd_logit_pundertreat'=0,
+                   'logit_pundertreat'=rep(0,nsurvey),
+                   'offset_private_pundertreat'=0,
+                   'mean_logit_povertreat'=0,
+                   'log_sd_logit_povertreat'=0,
+                   'logit_povertreat'=rep(0,nsurvey),
+                   'offset_private_povertreat'=0,
+                   'mean_logit_pprick'=0,
+                   'log_sd_logit_pprick'=0,
+                   'logit_pprick'=rep(0,nsurvey),
+                   'offset_private_pprick'=0,
+                   'mean_logit_ppresumptive'=0,
+                   'log_sd_logit_ppresumptive'=0,
+                   'logit_ppresumptive'=rep(0,nsurvey),
+                   'offset_private_ppresumptive'=0,
+                   'net_effect_pr'=0,
+                   'wealth_effect_pr_raw'=rep(0,4),
+                   'mother_effect_pr_raw'=rep(0,3),
+                   'age_effect_pr_raw'=rep(0,4),
+                   'wealth_effect_pbg_raw'=rep(0,4),
+                   'mother_effect_pbg_raw'=rep(0,3),
+                   'age_effect_pbg_raw'=rep(0,4),
+                   'wealth_effect_ptreat_raw'=rep(0,4),
+                   'mother_effect_ptreat_raw'=rep(0,3),
+                   'age_effect_ptreat_raw'=rep(0,4)
+)
+
+library(TMB)
+compile("NMFItmb_basic.cpp")
+dyn.load(dynlib("NMFItmb_basic"))
+obj <- MakeADFun(data,parameters,random=c('logit_pr_offset','logit_pbg_offset','logit_ptreat_offset','logit_ptreatmaf_offset','logit_ptreatboth_offset','logit_pundertreat','logit_povertreat','logit_pprick','logit_ppresumptive'),DLL="NMFItmb_basic")
+
+opt <- nlminb(obj$par,obj$fn,obj$gr,control=list(iter.max=10,eval.max=10))
+opt <- nlminb(opt$par,obj$fn,obj$gr,control=list(iter.max=200,eval.max=200))
+opt <- nlminb(opt$par,obj$fn,obj$gr,control=list(iter.max=200,eval.max=200))
+opt <- nlminb(opt$par,obj$fn,obj$gr,control=list(iter.max=200,eval.max=200))
+rep <- sdreport(obj,getJointPrecision=T)
+#save(opt,rep,file="optrep.dat")
+
+
+
+### Plot key effect estimates: Wealth
+
+pdf("Plots/wealth_pbg.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pbg_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=rev(c("Poorest","Poorer","Middle","Richer","Richest")))
+mtext("Household Wealth",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Background Fever (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/wealth_pr.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_pr_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_pr_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=rev(c("Poorest","Poorer","Middle","Richer","Richest")))
+mtext("Household Wealth",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Parasite Prevalence (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/wealth_ptreat.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="wealth_effect_ptreat_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=rev(c("Poorest","Poorer","Middle","Richer","Richest")))
+mtext("Household Wealth",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Treatment Seeking (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+### Plot key effect estimates: Mother's Education
+
+pdf("Plots/education_pbg.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,4.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pbg_raw"][3]),border="black",density=20,angle=45)
+
+lines(c(3.5,4.5),c(0,0))
+
+axis(1,at=c(1,2,3,4),labels=rev(c("No education","Primary","Secondary","Higher")))
+mtext("Mother's Education",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Background Fever (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/education_pr.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,4.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_pr_raw"][3]),border="black",density=20,angle=45)
+
+lines(c(3.5,4.5),c(0,0))
+
+axis(1,at=c(1,2,3,4),labels=rev(c("No education","Primary","Secondary","Higher")))
+mtext("Mother's Education",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Parasite Prevalence (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/education_ptreat.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,4.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="mother_effect_ptreat_raw"][3]),border="black",density=20,angle=45)
+
+lines(c(3.5,4.5),c(0,0))
+
+axis(1,at=c(1,2,3,4),labels=rev(c("No education","Primary","Secondary","Higher")))
+mtext("Mother's Education",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Treatment Seeking (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+### Plot key effect estimates: Age
+
+pdf("Plots/age_pbg.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pbg_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pbg_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=(c("0-1","1-2","2-3","3-4","4-5")))
+mtext("Age",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Background Fever (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/age_pr.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_pr_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_pr_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=(c("0-1","1-2","2-3","3-4","4-5")))
+mtext("Age",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Parasite Prevalence (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+pdf("Plots/age_ptreat.pdf",width=8,height=6)
+par(mai=c(0.9,1,0.2,0.2))
+plot(c(1,2,3,4,5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"],0),ylim=c(-1.3,1.3),xlim=c(0.5,5.5),xaxt='n',yaxt='n',col="white",xlab="",ylab="")
+polygon(c(0.5,1.5,1.5,0.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][1]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][1],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][1]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][1]),border="black",density=20,angle=45)
+
+polygon(c(1.5,2.5,2.5,1.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][2]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][2],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][2]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][2]),border="black",density=20,angle=45)
+
+polygon(c(2.5,3.5,3.5,2.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][3]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][3],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][3]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][3]),border="black",density=20,angle=45)
+
+polygon(c(3.5,4.5,4.5,3.5),c(rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][4]-2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][4],rep$par.fixed[names(rep$par.fixed)=="age_effect_ptreat_raw"][4]+2*sqrt(diag(rep$cov.fixed))[names(rep$par.fixed)=="age_effect_ptreat_raw"][4]),border="black",density=20,angle=45)
+
+lines(c(4.5,5.5),c(0,0))
+
+axis(1,at=c(1,2,3,4,5),labels=(c("0-1","1-2","2-3","3-4","4-5")))
+mtext("Age",side=1,line=2.7,cex=1.35)
+axis(2,las=2)
+mtext("Effect on Treatment Seeking (Logit Scale)",side=2,line=3.1,cex=1.35)
+dev.off()
+
+### Generate comprehensive output tables; full uncertainties
+
+library(sparseMVN)
+library(MASS)
+name.matching <- match(names(c(rep$par.fixed,rep$par.random)),names(rep$jointPrecision[1,]))
+name.matching[duplicated(name.matching)] <- NA
+for (i in 2:length(name.matching)) {
+  if (is.na(name.matching[i])) {name.matching[i] <- name.matching[i-1]+1}
+}
+r.draws <- rmvn.sparse(300,c(rep$par.fixed,rep$par.random)[sort.list(name.matching)],Cholesky(rep$jointPrecision),prec=T)
+par.names <- names(rep$jointPrecision[1,])
+
+# Random effect summaries
+cat("#age group:, , 0-1, , , 1-2, , , 2-3, , , 3-4, \n",sep="",file="age_effects.csv")
+cat("#posterior quantile:, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%\n",sep="",file="age_effects.csv",append=T)
+cat("age_effect_pr,",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pr_raw")[4]],0.975),"\n",sep="",file="age_effects.csv",append=T)
+cat("age_effect_pbg,",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_pbg_raw")[4]],0.975),"\n",sep="",file="age_effects.csv",append=T)
+cat("age_effect_ptreat,",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="age_effect_ptreat_raw")[4]],0.975),"\n",sep="",file="age_effects.csv",append=T)
+
+cat("#household wealth class:, , Richest, , , Richer, , , Middle, , , Poorer, \n",sep="",file="wealth_effects.csv")
+cat("#posterior quantile:, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%\n",sep="",file="wealth_effects.csv",append=T)
+cat("wealth_effect_pr,",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pr_raw")[4]],0.975),"\n",sep="",file="wealth_effects.csv",append=T)
+cat("wealth_effect_pbg,",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_pbg_raw")[4]],0.975),"\n",sep="",file="wealth_effects.csv",append=T)
+cat("wealth_effect_ptreat,",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[3]],0.975),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[4]],0.025),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[4]],0.50),",",quantile(r.draws[,which(par.names=="wealth_effect_ptreat_raw")[4]],0.975),"\n",sep="",file="wealth_effects.csv",append=T)
+
+cat("#mother's education:, , Higher, , , Secondary, , , Primary, \n",sep="",file="mother_effects.csv")
+cat("#posterior quantile:, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5%, 2.5%, 50%, 97.5% \n",sep="",file="mother_effects.csv",append=T)
+cat("mother_effect_pr,",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pr_raw")[3]],0.975),"\n",sep="",file="mother_effects.csv",append=T)
+cat("mother_effect_pbg,",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_pbg_raw")[3]],0.975),"\n",sep="",file="mother_effects.csv",append=T)
+cat("mother_effect_ptreat,",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[1]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[1]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[1]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[2]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[2]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[2]],0.975),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[3]],0.025),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[3]],0.50),",",quantile(r.draws[,which(par.names=="mother_effect_ptreat_raw")[3]],0.975),"\n",sep="",file="mother_effects.csv",append=T)
+
+pr <- maf <- pbg <- ptreat <- ptreatmaf <- ptreatboth <- pprick <- pundertreat <- prevert <- povertreat <- ppresumptive <- matrix(0,nrow=length(Fstat),ncol=300)
+for (i in 1:300) {
+  outputs <- obj$report(r.draws[i,])
+  pr[,i] <- outputs$pr
+  maf[,i] <- outputs$maf
+  pbg[,i] <- outputs$pbg
+  ptreat[,i] <- outputs$ptreat
+  ptreatmaf[,i] <- outputs$ptreatmaf
+  ptreatboth[,i] <- outputs$ptreatboth
+  pprick[,i] <- outputs$pprick
+  pundertreat[,i] <- outputs$pundertreat
+  prevert[,i] <- rdt.persist
+  povertreat[,i] <- outputs$povertreat
+  ppresumptive[,i] <- outputs$ppresumptive
+  cat(i,"\n")
+}
+#save(pr,maf,pbg,ptreat,ptreatmaf,ptreatboth,pprick,pundertreat,prevert,povertreat,ppresumptive,file="ps.dat")
+
+#load("Z:\\Malaria data\\Overdiagnosis paper\\outputs 200718\\ps.dat")
+
+# Compute posterior fever type probabilities
+bfactor <- 0.472
+maf <- maf*bfactor
+individual.pbgonly <- individual.pmafonly <- individual.pboth <- individual.pbgonly_pos <- matrix(0,ncol=300,nrow=length(Pstat))
+
+PposFposTpos <- which(Pstat==1 & Fstat==1 & (Tstat==1  | Tstat==2))
+individual.pbgonly[PposFposTpos,] <- ((pbg*(1-maf)*ptreat)/(maf*(1-pbg)*ptreatmaf+maf*pbg*ptreatboth+pbg*(1-maf)*ptreat))[PposFposTpos,]
+individual.pmafonly[PposFposTpos,] <- (((1-pbg)*maf*ptreatmaf)/(maf*(1-pbg)*ptreatmaf+maf*pbg*ptreatboth+pbg*(1-maf)*ptreat))[PposFposTpos,]
+individual.pboth[PposFposTpos,] <- ((pbg*maf*ptreatboth)/(maf*(1-pbg)*ptreatmaf+maf*pbg*ptreatboth+pbg*(1-maf)*ptreat))[PposFposTpos,]
+individual.pbgonly_pos[PposFposTpos,] <- ((pbg*(1-maf)*ptreat)/(maf*(1-pbg)*ptreatmaf+maf*pbg*ptreatboth+pbg*(1-maf)*ptreat))[PposFposTpos,]
+
+PnegFposTposHposApos <- which(Pstat==0 & Fstat==1 & (Tstat==1  | Tstat==2) & Hstat==1 & Astat==1)
+individual.pbgonly[PnegFposTposHposApos,] <- (((1-pr)*pbg*ptreat*povertreat+pr*((1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHposApos,]
+individual.pmafonly[PnegFposTposHposApos,] <- ((pr*(maf*(1-pbg)*ptreatmaf)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHposApos,]
+individual.pboth[PnegFposTposHposApos,] <- ((pr*(maf*pbg*ptreatboth)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHposApos,]
+individual.pbgonly_pos[PnegFposTposHposApos,] <- ((pr*((1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHposApos,]
+
+PnegFposTposHnegApos <- which(Pstat==0 & Fstat==1 & (Tstat==1  | Tstat==2) & Hstat==0 & Astat==1)
+individual.pbgonly[PnegFposTposHnegApos,] <- (((1-pr)*pbg*ptreat+pr*((1-maf)*pbg*ptreat)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth +(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHnegApos,]
+individual.pmafonly[PnegFposTposHnegApos,] <- ((pr*(maf*(1-pbg)*ptreatmaf)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHnegApos,]
+individual.pboth[PnegFposTposHnegApos,] <- ((pr*(maf*pbg*ptreatboth)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHnegApos,]
+individual.pbgonly_pos[PnegFposTposHnegApos,] <- ((pr*((1-maf)*pbg*ptreat)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth +(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHnegApos,]
+
+PnegFposTposHunkApos <- which(Pstat==0 & Fstat==1 & (Tstat==1  | Tstat==2) & Hstat==2 & Astat==1)
+individual.pbgonly[PnegFposTposHunkApos,] <- ((1-pprick)*((1-pr)*pbg*ptreat+pr*((1-maf)*pbg*ptreat)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHunkApos,]+(pprick*((1-pr)*pbg*ptreat*povertreat+pr*((1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHunkApos,]
+individual.pmafonly[PnegFposTposHunkApos,] <- ((1-pprick)*(pr*(maf*(1-pbg)*ptreatmaf)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHunkApos,]+(pprick*(pr*(maf*(1-pbg)*ptreatmaf)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHunkApos,]
+individual.pboth[PnegFposTposHunkApos,] <- ((1-pprick)*(pr*(maf*pbg*ptreatboth)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHunkApos,]+(pprick*(pr*(maf*pbg*ptreatboth)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHunkApos,]
+individual.pbgonly_pos[PnegFposTposHunkApos,] <- ((1-pprick)*(pr*((1-maf)*pbg*ptreat)*pcure*prevert)/((1-pr)*pbg*ptreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*pcure*prevert))[PnegFposTposHunkApos,]+(pprick*(pr*((1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert)/((1-pr)*pbg*ptreat*povertreat+pr*((1-pbg)*maf*ptreatmaf+pbg*maf*ptreatboth+(1-maf)*pbg*ptreat)*(1.0-pundertreat)*pcure*prevert))[PnegFposTposHunkApos,]
+
+PnegFposTposAneg <- which(Pstat==0 & Fstat==1 & (Tstat==1  | Tstat==2) & Astat==0)
+individual.pbgonly[PnegFposTposAneg,] <- 1
+
+PnegFposTneg <- which(Pstat==0 & Fstat==1 & Tstat==0)
+individual.pbgonly[PnegFposTneg,] <- 1
+
+PposFposTneg <- which(Pstat==1 & Fstat==1 & Tstat==0)
+individual.pbgonly[PposFposTneg,] <- ((pbg*(1-maf)*(1-ptreat))/(maf*(1-pbg)*(1-ptreatmaf)+maf*pbg*(1-ptreatboth)+pbg*(1-maf)*(1-ptreat)))[PposFposTneg,]
+individual.pmafonly[PposFposTneg,] <- (((1-pbg)*maf*(1-ptreatmaf))/(maf*(1-pbg)*(1-ptreatmaf)+maf*pbg*(1-ptreatboth)+pbg*(1-maf)*(1-ptreat)))[PposFposTneg,]
+individual.pboth[PposFposTneg,] <- ((pbg*maf*(1-ptreatboth))/(maf*(1-pbg)*(1-ptreatmaf)+maf*pbg*(1-ptreatboth)+pbg*(1-maf)*(1-ptreat)))[PposFposTneg,]
+individual.pbgonly_pos[PposFposTneg,] <- ((pbg*(1-maf)*(1-ptreat))/(maf*(1-pbg)*(1-ptreatmaf)+maf*pbg*(1-ptreatboth)+pbg*(1-maf)*(1-ptreat)))[PposFposTneg,]
+
+weight.matrix <- weights
+for (i in 1:299) {weight.matrix <- cbind(weight.matrix,weights)}
+
+individual.pheelprick <- matrix(0,ncol=300,nrow=length(Tstat))
+Hpos <- which(Hstat==1)
+individual.pheelprick[Hpos,] <- 1
+Hneg <- which(Hstat==0)
+individual.pheelprick[Hneg,] <- 0
+Hunk <- which(Hstat==2)
+individual.pheelprick[Hunk,] <- pprick[Hunk,]
+
+individual.ppos <- matrix(0,ncol=300,nrow=length(Tstat))
+Ppos <- which(Pstat==1)
+individual.ppos[Ppos,] <- 1
+PnegApos <- which(Astat==1 & Pstat==0)
+individual.ppos[PnegApos,] <- prevert[PnegApos,]
+
+# Proportions of individuals by fever type including no fevers
+cat("Class:,,p_nofever,,,p_mafonly,,,p_bgonly,,,p_both,\n",file="proportions_including_nofevers.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_including_nofevers.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.nofever <- colSums(weight.matrix[Fstat==0 & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & survey==(i-1),])
+  n.tot <- n.nofever+n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.nofever/n.tot,0.025),",",quantile(n.nofever/n.tot,0.5),",",quantile(n.nofever/n.tot,0.975),",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),"\n",sep="",file="proportions_including_nofevers.csv",append=T)
+}
+
+# Proportions of individuals by fever type excluding no fevers
+cat("Class:,,p_mafonly,,,p_bgonly,,,p_both,\n",file="proportions_excluding_nofevers.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_excluding_nofevers.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & survey==(i-1),])
+  n.tot <- n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),"\n",sep="",file="proportions_excluding_nofevers.csv",append=T)
+}
+
+# Proportions of individuals by fever type who sought treatment
+cat("Class:,,p_mafonly,,,p_bgonly,,,p_both,\n",file="proportions_amongst_those_who_sought_treatment.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_amongst_those_who_sought_treatment.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.tot <- n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),"\n",sep="",file="proportions_amongst_those_who_sought_treatment.csv",append=T)
+}
+
+
+# Proportions of individuals by fever type who sought treatment - public only
+cat("Class:,,p_mafonly,,,p_bgonlypneg,,,p_both,,,p_bgonlyppos,,,p_mafdivmf,\n",file="proportions_amongst_those_who_sought_treatment_publiconly.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_amongst_those_who_sought_treatment_publiconly.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.bg.pfpos <- colSums((weight.matrix*individual.pbgonly_pos)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.bg<-n.bg-n.bg.pfpos
+  
+  n.mafdivmf<-n.mafdivmf<-(n.maf+n.both)/(n.maf+n.both+n.bg.pfpos)
+  
+  n.tot <- n.maf+n.both+n.bg+n.bg.pfpos
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),",",quantile(n.bg.pfpos/n.tot,0.025),",",quantile(n.bg.pfpos/n.tot,0.5),",",quantile(n.bg.pfpos/n.tot,0.975),",",quantile(n.mafdivmf,0.025),",",quantile(n.mafdivmf,0.5),",",quantile(n.mafdivmf,0.975),"\n",sep="",file="proportions_amongst_those_who_sought_treatment_publiconly.csv",append=T)
+}
+
+
+# proportion of MAF amongst malaria pos fevers who sought treatment at public
+cat("Class:,,p_mafdivmf,,,\n",file="malaria pos fever at public.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,\n",file="malaria pos fever at public.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  n.bg.pfpos <- colSums((weight.matrix*individual.pbgonly_pos)[Fstat==1 & (Tstat==1  ) & survey==(i-1),])
+  
+  n.mafdivmf<-(n.maf+n.both)/(n.maf+n.both+n.bg.pfpos)
+
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.mafdivmf,0.025),",",quantile(n.mafdivmf,0.5),",",quantile(n.mafdivmf,0.975),"\n",sep="",file="malaria pos fever at public.csv",append=T)
+}
+
+
+# Proportions of individuals by fever type who received an antimalarial
+cat("Class:,,p_mafonly,,,p_bgonly,,,p_both,\n",file="proportions_amongst_those_who_received_antimalarials.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_amongst_those_who_received_antimalarials.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & Astat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & Astat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & Astat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.tot <- n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),"\n",sep="",file="proportions_amongst_those_who_received_antimalarials.csv",append=T)
+}
+
+# Proportions of individuals by fever type who received a heelprick
+cat("Class:,,p_mafonly,,,p_bgonly,,,p_both,\n",file="proportions_amongst_those_who_received_a_heelprick.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_amongst_those_who_received_a_heelprick.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.tot <- n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.maf/n.tot,0.025),",",quantile(n.maf/n.tot,0.5),",",quantile(n.maf/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),",",quantile(n.both/n.tot,0.025),",",quantile(n.both/n.tot,0.5),",",quantile(n.both/n.tot,0.975),"\n",sep="",file="proportions_amongst_those_who_received_a_heelprick.csv",append=T)
+}
+
+# Proportions of individuals by fever type who received a heelprick: reduced
+cat("Class:,,p_mafonly+p_both,,,p_bgonly,\n",file="proportions_amongst_those_who_received_a_heelprick_mafplusboth_vs_bgonly.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,\n",file="proportions_amongst_those_who_received_a_heelprick_mafplusboth_vs_bgonly.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.maf <- colSums((weight.matrix*individual.pmafonly*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly*individual.pheelprick)[Fstat==1 & (Hstat%in%c(1,2)) & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.mafplusboth <- n.maf+n.both
+  n.tot <- n.maf+n.both+n.bg
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.mafplusboth/n.tot,0.025),",",quantile(n.mafplusboth/n.tot,0.5),",",quantile(n.mafplusboth/n.tot,0.975),",",quantile(n.bg/n.tot,0.025),",",quantile(n.bg/n.tot,0.5),",",quantile(n.bg/n.tot,0.975),"\n",sep="",file="proportions_amongst_those_who_received_a_heelprick_mafplusboth_vs_bgonly.csv",append=T)
+}
+
+# Probability of receiving a heelprick by fever type amongst those who sought treatment
+cat("Class:,,p_heelprick_given_mafonly,,,p_heelprick_given_bgonly,,,p_heelprick_given_both,\n",file="probabilty_of_receiving_a_heelprick_by_fever_type_amongst_those_who_sought_treatment.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_receiving_a_heelprick_by_fever_type_amongst_those_who_sought_treatment.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.heelprickmaf <- colSums((weight.matrix*individual.pmafonly*individual.pheelprick)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.heelprickbg <- colSums((weight.matrix*individual.pbgonly*individual.pheelprick)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.heelprickboth <- colSums((weight.matrix*individual.pboth*individual.pheelprick)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.heelprickmaf/n.maf,0.025),",",quantile(n.heelprickmaf/n.maf,0.5),",",quantile(n.heelprickmaf/n.maf,0.975),",",quantile(n.heelprickbg/n.bg,0.025),",",quantile(n.heelprickbg/n.bg,0.5),",",quantile(n.heelprickbg/n.bg,0.975),",",quantile(n.heelprickboth/n.both,0.025),",",quantile(n.heelprickboth/n.both,0.5),",",quantile(n.heelprickboth/n.both,0.975),"\n",sep="",file="probabilty_of_receiving_a_heelprick_by_fever_type_amongst_those_who_sought_treatment.csv",append=T)
+}
+
+# Probability of receiving an antimalarial by fever type amongst those who sought treatment
+cat("Class:,,p_antimalarial_given_mafonly,,,p_antimalarial_given_bgonly,,,p_antimalarial_given_both,\n",file="probabilty_of_receiving_an_antimalarial_by_fever_type_amongst_those_who_sought_treatment.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_receiving_an_antimalarial_by_fever_type_amongst_those_who_sought_treatment.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.antimalarialmaf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.antimalarialbg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.antimalarialboth <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.antimalarialmaf/n.maf,0.025),",",quantile(n.antimalarialmaf/n.maf,0.5),",",quantile(n.antimalarialmaf/n.maf,0.975),",",quantile(n.antimalarialbg/n.bg,0.025),",",quantile(n.antimalarialbg/n.bg,0.5),",",quantile(n.antimalarialbg/n.bg,0.975),",",quantile(n.antimalarialboth/n.both,0.025),",",quantile(n.antimalarialboth/n.both,0.5),",",quantile(n.antimalarialboth/n.both,0.975),"\n",sep="",file="probabilty_of_receiving_an_antimalarial_by_fever_type_amongst_those_who_sought_treatment.csv",append=T)
+}
+
+# Probability of seeking treatment by fever type
+cat("Class:,,p_treatment_given_mafonly,,,p_treatment_given_bgonly,,,p_treatment_given_both,\n",file="probabilty_of_seeking_treatment_by_fever_type.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_seeking_treatment_by_fever_type.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.treatmentmaf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & survey==(i-1),])
+  n.treatmentbg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & survey==(i-1),])
+  n.treatmentboth <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.treatmentmaf/n.maf,0.025),",",quantile(n.treatmentmaf/n.maf,0.5),",",quantile(n.treatmentmaf/n.maf,0.975),",",quantile(n.treatmentbg/n.bg,0.025),",",quantile(n.treatmentbg/n.bg,0.5),",",quantile(n.treatmentbg/n.bg,0.975),",",quantile(n.treatmentboth/n.both,0.025),",",quantile(n.treatmentboth/n.both,0.5),",",quantile(n.treatmentboth/n.both,0.975),"\n",sep="",file="probabilty_of_seeking_treatment_by_fever_type.csv",append=T)
+}
+
+# Probability of receiving an ACT by fever type amongst those who sought treatment
+cat("Class:,,p_act_given_mafonly,,,p_act_given_bgonly,,,p_act_given_both,\n",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.antimalarialmaf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.antimalarialbg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.antimalarialboth <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.antimalarialmaf/n.maf,0.025),",",quantile(n.antimalarialmaf/n.maf,0.5),",",quantile(n.antimalarialmaf/n.maf,0.975),",",quantile(n.antimalarialbg/n.bg,0.025),",",quantile(n.antimalarialbg/n.bg,0.5),",",quantile(n.antimalarialbg/n.bg,0.975),",",quantile(n.antimalarialboth/n.both,0.025),",",quantile(n.antimalarialboth/n.both,0.5),",",quantile(n.antimalarialboth/n.both,0.975),"\n",sep="",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment.csv",append=T)
+}
+
+# Probability of receiving an ACT by fever type amongst those who sought treatment and received an antimalarial
+cat("Class:,,p_act_given_mafonly,,,p_act_given_bgonly,,,p_act_given_both,\n",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment_and_received_an_antimalarial.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment_and_received_an_antimalarial.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.antimalarialmaf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  n.antimalarialbg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  n.antimalarialboth <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & act==1 & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & Astat==1 & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.antimalarialmaf/n.maf,0.025),",",quantile(n.antimalarialmaf/n.maf,0.5),",",quantile(n.antimalarialmaf/n.maf,0.975),",",quantile(n.antimalarialbg/n.bg,0.025),",",quantile(n.antimalarialbg/n.bg,0.5),",",quantile(n.antimalarialbg/n.bg,0.975),",",quantile(n.antimalarialboth/n.both,0.025),",",quantile(n.antimalarialboth/n.both,0.5),",",quantile(n.antimalarialboth/n.both,0.975),"\n",sep="",file="probabilty_of_receiving_an_act_by_fever_type_amongst_those_who_sought_treatment_and_received_an_antimalarial.csv",append=T)
+}
+
+# Probability of seeking treatment at a public facility by fever type amongst those who sought treatment
+cat("Class:,,p_treatment_given_mafonly,,,p_treatment_given_bgonly,,,p_treatment_given_both,\n",file="probabilty_of_seeking_treatment_at_a_public_facility_by_fever_type_amongst_those_who_sought_treatment.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="probabilty_of_seeking_treatment_at_a_public_facility_by_fever_type_amongst_those_who_sought_treatment.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.treatmentmaf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & treatmentlocation==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.maf <- colSums((weight.matrix*individual.pmafonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.treatmentbg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & treatmentlocation==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.treatmentboth <- colSums((weight.matrix*individual.pboth)[Fstat==1 & treatmentlocation==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  n.both <- colSums((weight.matrix*individual.pboth)[Fstat==1 & (Tstat==1  | Tstat==2) & survey==(i-1),])
+  
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(n.treatmentmaf/n.maf,0.025),",",quantile(n.treatmentmaf/n.maf,0.5),",",quantile(n.treatmentmaf/n.maf,0.975),",",quantile(n.treatmentbg/n.bg,0.025),",",quantile(n.treatmentbg/n.bg,0.5),",",quantile(n.treatmentbg/n.bg,0.975),",",quantile(n.treatmentboth/n.both,0.025),",",quantile(n.treatmentboth/n.both,0.5),",",quantile(n.treatmentboth/n.both,0.975),"\n",sep="",file="probabilty_of_seeking_treatment_at_a_public_facility_by_fever_type_amongst_those_who_sought_treatment.csv",append=T)
+}
+
+# Undertreatment, overtreatment, and presumptive treatment probabilities by survey
+cat("Class:,,p_undertreatment,,,p_overtreatment,,,p_presumptive,\n",file="undertreatment_overtreatment_and_presumptive_treatment_by_survey.csv",sep="")
+cat("Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="undertreatment_overtreatment_and_presumptive_treatment_by_survey.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",",quantile(pundertreat[survey==(i-1),],0.025),",",quantile(pundertreat[survey==(i-1),],0.5),",",quantile(pundertreat[survey==(i-1),],0.975),",",quantile(povertreat[survey==(i-1),],0.025),",",quantile(povertreat[survey==(i-1),],0.5),",",quantile(povertreat[survey==(i-1),],0.975),",",quantile(ppresumptive[survey==(i-1),],0.025),",",quantile(ppresumptive[survey==(i-1),],0.5),",",quantile(ppresumptive[survey==(i-1),],0.975),"\n",sep="",file="undertreatment_overtreatment_and_presumptive_treatment_by_survey.csv",append=T)
+}
+
+# National level PR versus MAF/(pos+fever)
+
+cat("Class:,,PR (in the absence of treatment),,,maf/FposPpos,,\n",file="maf_on_FposPpos_ratio_versus_PR.csv",sep="")
+cat("#Posterior quantile:,2.5%,50%,97.5%,2.5%,50%,97.5%\n",file="maf_on_FposPpos_ratio_versus_PR.csv",sep="",append=T)
+for (i in 1:nsurvey) {
+  n.pr <- colSums((weight.matrix*individual.ppos)[survey==(i-1),])/colSums((weight.matrix)[survey==(i-1),])
+  n.maf <- colSums((weight.matrix*(individual.pmafonly+individual.pboth))[survey==(i-1),])
+  n.bg <- colSums((weight.matrix*individual.pbgonly_pos)[survey==(i-1),])
+  n.fraction <- n.maf/(n.maf+n.bg)
+  cat(unique(as.character(nmfi.data$survey.x[valid]))[i],",,",mean(n.pr),",,",quantile(n.fraction,0.025),",",quantile(n.fraction,0.5),",",quantile(n.fraction,0.975),"\n",sep="",file="maf_on_FposPpos_ratio_versus_PR.csv",append=T)
+}
