@@ -1,5 +1,7 @@
 # MAF-NMFI
-Models for estimating malaria-attributable fever and non-malarial febrile illness from household survey data
+Models for estimating malaria-attributable fever and non-malarial febrile illness continuous spatial prevalence from household survey data
+
+## This model is the version published in eLife in 2017: https://elifesciences.org/articles/29198
 
 ### R script to run NMFI model with treatment propensity
 
