@@ -1,5 +1,7 @@
 ## Boosted regression tree model to estimate environmental suitability for non-malarial fever across Africa (covariate used in final model)
 
+## This file is the BRT model used for the following publication: https://elifesciences.org/articles/29198
+
 data_brt2<-read.csv("Z:\\Malaria data\\ACT treatment\\BRT revision\\cellnum.data_allcovariates.csv")
 
 data_brt2<-data_brt2[,2:length(data_brt2)] # remove index columns
